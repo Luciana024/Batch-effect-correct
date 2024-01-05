@@ -1,0 +1,556 @@
+# Batch merge #
+setwd("/Users/fengjiao.li/Desktop/demo_ComBat")
+read_dir = "/Users/fengjiao.li/Desktop/dataset7/"
+b1_exprs_file = "b1_exprs.txt"
+b2_exprs_file = "b2_exprs.txt"
+b1_celltype_file = "b1_celltype.txt"
+b2_celltype_file = "b2_celltype.txt"
+
+b1_exprs <- read.table(paste0(read_dir,b1_exprs_file), sep="\t", header=T, row.names=1, check.names=F)
+b2_exprs <- read.table(paste0(read_dir,b2_exprs_file), sep="\t", header=T, row.names=1, check.names=F)
+b1_celltype <- read.table(paste0(read_dir,b1_celltype_file), sep="\t", header=T, row.names=1, check.names=F)
+b2_celltype <- read.table(paste0(read_dir,b2_celltype_file), sep="\t", header=T, row.names=1, check.names=F)
+b1_batch_label <- rep('Batch_1', ncol(b1_exprs))
+b1_batch_label <- data.frame("batch"=b1_batch_label)
+row.names(b1_batch_label) <- colnames(b1_exprs)
+b1_metadata = cbind(b1_celltype, b1_batch_label)
+
+b2_batch_label <- rep('Batch_2', ncol(b2_exprs))
+b2_batch_label <- data.frame("batch"=b2_batch_label)
+row.names(b2_batch_label) <- colnames(b2_exprs)
+b2_metadata = cbind(b2_celltype, b2_batch_label)
+
+# expr_mat = cbind(b1_exprs,b2_exprs,b3_exprs)
+#batchlabel_v = c(b1_batch_label,b2_batch_label,b3_batch_label)
+#celltype_v = c(b1_celltype,b2_celltype,b3_celltype)
+# data_meta = rbind(b1_metadata, b2_metadata, b3_metadata)
+
+
+# rm(list=ls())
+library(sva)
+library(Seurat)
+packageVersion('Seurat')
+library(matrixStats)
+library(SingleCellExperiment)
+library(MatrixModels)
+library(singleCellTK)
+library(Seurat)
+packageVersion('Seurat')
+library(cowplot)
+this.dir <- '/Users/fengjiao.li/Desktop/demo_ComBat/'
+setwd(this.dir)
+data_dir <- '/Users/fengjiao.li/Desktop/dataset7/'
+base_name <- 'combat_dataset/'
+dir.create(base_name, showWarnings = FALSE)
+
+# load evaluation & preprocess utils files #
+utils_dir <- '/Users/fengjiao.li/Desktop/ComBat/'
+source(paste0(utils_dir,'ComBat_seq.R'))
+source(paste0(utils_dir,'ComBat_functions.R'))
+source(paste0(utils_dir,'helper_seq.R'))
+Exprs<- cbind(b1_exprs,b2_exprs)
+Sample <- rbind(b1_metadata, b2_metadata)
+Sample$celltype <- Sample$CellType
+table(Sample$batch,Sample$celltype)
+set.seed(123)
+data7<-sample(Exprs,size=2000,replace=FALSE)
+# Pre-filtering data 
+# Func as.matrix() can not work with big data, divide big matrix into small parts and do filtering
+# Normalize each library to the median of the transcript counts across all cells 
+# Then, log transform expression values 
+myFilteredData <- filter_data_mtx(data7, base_name, is_filter_cells=TRUE,min_genes=300, 
+                                  is_filter_genes=TRUE, min_cells=20)
+lengths_list <- lengths(myFilteredData)
+all_equal <- all(lengths_list == lengths_list[1])
+matrix_data <- do.call(rbind, myFilteredData)
+row_max <- matrixStats::rowMaxs(matrix_data)
+row_min = matrixStats::rowMins(matrix_data)
+if(sum(row_max==row_min)>0){
+  myFilteredData = myFilteredData[row_max != row_min,]
+}
+cells_use <- colnames(myFilteredData)
+mySample <- Sample[cells_use,]
+table(mySample$batch,mySample$celltype)
+myFilteredData_matrix=as.matrix(myFilteredData)
+
+#############密度 amacrine########
+# 选择 amacrine 细胞类型
+selected_cells_before <- which(mySample$celltype == "amacrine")
+
+# 从 myFilteredData_matrix 中选择相应的细胞
+selected_data_before <- myFilteredData_matrix[, selected_cells_before]
+
+# 计算每个细胞的平均基因表达
+average_expression_before <- rowMeans(selected_data_before)
+
+# Compute average expression for each gene across all selected cells
+average_expression_per_cell_before <- colMeans(myFilteredData_matrix[, selected_cells_before])
+
+plot_data <- data.frame(
+  AverageExpression = average_expression_per_cell_before,
+  Batch = mySample$batch[selected_cells_before]
+)
+
+library(ggplot2)
+ggplot(plot_data, aes(x=AverageExpression, fill=Batch)) + 
+  geom_density(alpha=0.5) + 
+  theme_minimal() +
+  labs(title="Density plot of average expression across batches for amacrine cells")
+########
+
+# 选择所有细胞的数据
+selected_data_all <- myFilteredData_matrix
+
+# 计算每个细胞的平均基因表达
+average_expression_all <- rowMeans(selected_data_all)
+
+# 计算每个细胞的平均基因表达
+average_expression_per_cell_all <- colMeans(selected_data_all)
+
+plot_data_all <- data.frame(
+  AverageExpression = average_expression_per_cell_all,
+  Batch = mySample$batch
+)
+
+library(ggplot2)
+ggplot(plot_data_all, aes(x=AverageExpression, fill=Batch)) + 
+  geom_density(alpha=0.5) + 
+  theme_minimal() +
+  labs(title="Density plot of average expression across batches for all cells")
+
+########raw output##################
+# Create Seurat object to compute umap, pca
+raw_srt <- CreateSeuratObject(counts = myFilteredData, project = "dataset7-raw", min.cells = 0, min.features = 0)
+dim(raw_srt@assays$RNA)
+cells_use <- colnames(raw_srt@assays$RNA)
+raw_srt@meta.data$batch <- mySample$batch
+raw_srt@meta.data$celltype <- mySample$celltype
+
+max(GetAssayData(object = raw_srt, slot = "counts"))
+min(GetAssayData(object = raw_srt, slot = "counts"))
+raw.counts = GetAssayData(object = raw_srt, slot = "counts")
+raw_srt<- SetAssayData(object = raw_srt, slot = "scale.data", 
+                       new.data = as.matrix(raw.counts))
+raw_srt <- RunPCA(object = raw_srt,features = rownames(raw_srt@assays$RNA))  
+
+# Visualization
+
+raw_srt<- RunUMAP(raw_srt, reduction = 'pca', dims = 1:20)
+png(paste(base_name, "umap_raw_parametric.png", sep = ""), width = 2*1000, height = 2*500, res = 2*72)
+p1 <- DimPlot(raw_srt, reduction = 'umap', group.by = "batch")
+p2 <- DimPlot(raw_srt, reduction = 'umap',group.by = "celltype")
+cowplot::plot_grid(p1, p2)
+dev.off()
+save(raw_srt, file = paste0(base_name,"raw_seurat_objs.rda"))
+load("~/Desktop/demo_ComBat/combat_dataset/raw_seurat_objs.rda")
+PCAembedding = data.frame(Embeddings(raw_srt, reduction = 'pca'))
+PCAembedding$celltype <- raw_srt$celltype
+PCAembedding$batch <- raw_srt$batch
+write.csv(PCAembedding, file = paste0(base_name,"dataset7_raw_pca.csv"))
+## We need new functions for calculate the coefficient beta
+sce_obj <- SingleCellExperiment(assays=list(counts=myFilteredData_matrix),colData=mySample)
+cellind=colData(sce_obj)$celltype
+batchind=colData(sce_obj)$batch
+ssq1<- function(x,batch,cell){
+  mod <- lm(x~as.factor(batch)+as.factor(cell))
+  av <- anova(mod)
+  result <- av$`Sum Sq`
+  return(result)
+}
+expvar=t(apply(assay(sce_obj,"counts"),1,ssq1,batch=batchind,cell=cellind))
+colnames(expvar)=c("batch","cell","residual")
+ss=apply(expvar,2,sum) ## This is the sum of all SS across all the genes
+r_raw_all <- ss[2]/ss[1] ## This is the overall ratio between cell and batch 
+r_raw_all
+ss[2]
+ss[1]
+## Tables: cell type versus batch
+table(colData(sce_obj)$batch, colData(sce_obj)$celltype)
+ ######batch effect Correct############################
+## ComBat-seq 
+## First option, opt1 <- 'parametric/'
+# par.prior=TRUE, prior.plots=FALSE
+counts_subset <- assay(sce_obj,"counts")
+sample_subset <- colData(sce_obj)
+batch_subset <- colData(sce_obj)$batch
+combat_seq_output = ComBat_seq(counts_subset, batch=batch_subset, group=NULL, covar_mod=NULL, shrink=FALSE,par_prior=TRUE, prior_plots=FALSE)
+sce_obj_corr<- SingleCellExperiment(assays=list(counts=combat_seq_output),colData=sample_subset)
+expvar=t(apply(assay(sce_obj_corr,"counts"),1,ssq1,batch=batchind,cell=cellind))
+colnames(expvar)=c("batch","cell","residual")
+ss=apply(expvar,2,sum) ## This is the sum of all SS across all the genes
+r_combatseq <- ss[2]/ss[1] ## This is the overall ratio between cell and batch 
+ss[2]
+ss[1]
+r_combatseq
+beta_combatseq_all <- r_combatseq/r_raw_all
+beta_combatseq_all
+########Combat-seq output##################
+# Create Seurat object to compute umap, pca
+combat_srt <- CreateSeuratObject(counts = combat_seq_output, project = "dataset7_combat-seq", min.cells = 0, min.features = 0)
+dim(combat_srt@assays$RNA)
+cells_use <- colnames(combat_srt@assays$RNA)
+combat_srt@meta.data$batch <- mySample$batch
+combat_srt@meta.data$celltype <- mySample$celltype
+
+max(GetAssayData(object = combat_srt, slot = "counts"))
+min(GetAssayData(object = combat_srt, slot = "counts"))
+raw.counts = GetAssayData(object = combat_srt, slot = "counts")
+combat_srt <- SetAssayData(object = combat_srt, slot = "scale.data", 
+                           new.data = as.matrix(raw.counts))
+combat_srt <- RunPCA(object = combat_srt,features = rownames(combat_srt@assays$RNA))  
+
+# Visualization
+combat_srt <- RunUMAP(combat_srt, reduction = 'pca', dims = 1:20)
+png(paste(base_name, "umap_combatseq_parametric.png", sep = ""), width = 2*1000, height = 2*500, res = 2*72)
+p1 <- DimPlot(combat_srt, reduction = 'umap', group.by = "batch")
+p2 <- DimPlot(combat_srt, reduction = 'umap',group.by = "celltype")
+cowplot::plot_grid(p1, p2)
+dev.off()
+save(combat_srt, file = paste0(base_name,"combatseq_seurat_objs.rda"))
+load("~/Desktop/demo_ComBat/combat_dataset/combatseq_seurat_objs.rda")
+PCAembedding = data.frame(Embeddings(combat_srt, reduction = 'pca'))
+PCAembedding$celltype <- combat_srt$celltype
+PCAembedding$batch <- combat_srt$batch
+write.csv(PCAembedding, file = paste0(base_name,"dataset7_combatseq_pca.csv"))
+############################Combat-Cell-seq############################
+mod_cell_typ = model.matrix(~as.factor(celltype), data=sample_subset)
+combat_cell_output = ComBat_seq(counts_subset, batch=batch_subset, group=mySample$celltype,shrink=FALSE)
+sce_obj_corr_cell <- SingleCellExperiment(assays=list(counts=combat_cell_output),colData=sample_subset)
+expvar=t(apply(assay(sce_obj_corr_cell,"counts"),1,ssq1,batch=batchind,cell=cellind))
+colnames(expvar)=c("batch","cell","residual")
+ss=apply(expvar,2,sum) ## This is the sum of all SS across all the genes
+r_combatcellseq <- ss[2]/ss[1] ## This is the overall ratio between cell and batch 
+r_combatcellseq
+ss[2]
+ss[1]
+beta_combatcellseq_all <- r_combatcellseq/r_raw_all
+beta_combatcellseq_all
+########Combat-cell-seq output##################
+# Create Seurat object to compute umap, pca
+combat_srt1 <- CreateSeuratObject(counts = combat_cell_output, project = "dataset7_combat-cell-seq", min.cells = 0, min.features = 0)
+dim(combat_srt1@assays$RNA)
+cells_use <- colnames(combat_srt1@assays$RNA)
+combat_srt1@meta.data$batch <- mySample$batch
+combat_srt1@meta.data$celltype <- mySample$celltype
+
+max(GetAssayData(object = combat_srt1, slot = "counts"))
+min(GetAssayData(object = combat_srt1, slot = "counts"))
+raw.counts = GetAssayData(object = combat_srt1, slot = "counts")
+combat_srt1 <- SetAssayData(object = combat_srt1, slot = "scale.data", 
+                            new.data = as.matrix(raw.counts))
+combat_srt1 <- RunPCA(object = combat_srt1,features = rownames(combat_srt1@assays$RNA))  
+
+# Visualization
+
+combat_srt1 <- RunUMAP(combat_srt1, reduction = 'pca', dims = 1:20)
+png(paste(base_name, "umap_combat-cell-seq_parametric.png", sep = ""), width = 2*1000, height = 2*500, res = 2*72)
+p1 <- DimPlot(combat_srt1, reduction = 'umap', group.by = "batch")
+p2 <- DimPlot(combat_srt1, reduction = 'umap',group.by = "celltype")
+cowplot::plot_grid(p1, p2)
+dev.off()
+save(combat_srt1, file = paste0(base_name,"combat-cell-seq_seurat_objs.rda"))
+load("~/Desktop/demo_ComBat/combat_dataset/combat-cell-seq_seurat_objs.rda")
+PCAembedding = data.frame(Embeddings(combat_srt1, reduction = 'pca'))
+PCAembedding$celltype <- combat_srt1$celltype
+PCAembedding$batch <- combat_srt1$batch
+write.csv(PCAembedding, file = paste0(base_name,"dataset7_combatcellseq_pca.csv"))
+########################################## ComBat-SVA-Seq###################################
+mod = model.matrix(~as.factor(batch), data=sample_subset)
+mod0 = model.matrix(~1,data=sample_subset)
+svobj_filt = svaseq(counts_subset+ 1,mod,mod0,n.sv=10)
+sample_SVA <- sample_subset
+sample_SVA$SV1 = svobj_filt$sv[,1]
+sample_SVA$SV2 = svobj_filt$sv[,2]
+sample_SVA$SV3 = svobj_filt$sv[,3]
+sample_SVA$SV4 = svobj_filt$sv[,4]
+sample_SVA$SV5 = svobj_filt$sv[,5]
+sample_SVA$SV6 = svobj_filt$sv[,6]
+sample_SVA$SV7 = svobj_filt$sv[,7]
+sample_SVA$SV8 = svobj_filt$sv[,8]
+sample_SVA$SV9 = svobj_filt$sv[,9]
+sample_SVA$SV10 = svobj_filt$sv[,10]
+sce_obj_with_SVs <- SingleCellExperiment(assays=list(counts=counts_subset),colData=sample_SVA)
+## Select the important surrogate variables only; Selection by checking the boxplots
+variables <- c("SV1", "SV2", "SV3", "SV4", "SV5", "SV6", "SV7", "SV8")
+
+for (var in variables) {
+  filename <- paste0(var, "_boxplot.png")
+  
+  png(filename, width=1200, height=1200)
+  
+  formula <- as.formula(paste(var, "~ celltype"))
+  boxplot(formula, data=sample_SVA, ylim=c(-0.1, 0.1))
+  
+  dev.off()
+}
+
+## Now use ComBat-seq with the surrogate variables (we only use the first one;Check boxplot for sure)
+mod_SVA = model.matrix(~sample_SVA$SV1+sample_SVA$SV2+sample_SVA$SV3+sample_SVA$SV4+sample_SVA$SV5+sample_SVA$SV6+sample_SVA$SV7+sample_SVA$SV8,data=sample_SVA)
+combat_SVA_seq = ComBat_seq(counts_subset, batch=batch_subset, group=NULL, covar_mod=mod_SVA, shrink=FALSE)
+sce_obj_corr_SVA <- SingleCellExperiment(assays=list(counts=combat_SVA_seq),colData=sample_subset)
+###################
+expvar=t(apply(assay(sce_obj_corr_SVA,"counts"),1,ssq1,batch=batchind,cell=cellind))
+colnames(expvar)=c("batch","cell","residual")
+ss=apply(expvar,2,sum) ## This is the sum of all SS across all the genes
+ss
+r_combatsvaseq_all <- ss[2]/ss[1] ## This is the overall ratio between cell and batch 
+r_combatsvaseq_all
+ss[2]
+ss[1]
+## Calculate the beta coefficients for ComBat-seq
+beta_combatsvaseq_all <- r_combatsvaseq_all/r_raw_all
+beta_combatsvaseq_all 
+##################combat_SVA_seq ######
+# Create Seurat object to compute umap, pca
+combat_srt2 <- CreateSeuratObject(counts = combat_SVA_seq , project = "dataset7_combat-sva-seq", min.cells = 0, min.features = 0)
+dim(combat_srt2@assays$RNA)
+cells_use <- colnames(combat_srt2@assays$RNA)
+combat_srt2@meta.data$batch <- mySample$batch
+combat_srt2@meta.data$celltype <- mySample$celltype
+
+max(GetAssayData(object = combat_srt2, slot = "counts"))
+min(GetAssayData(object = combat_srt2, slot = "counts"))
+raw.counts = GetAssayData(object = combat_srt2, slot = "counts")
+combat_srt2 <- SetAssayData(object = combat_srt2, slot = "scale.data", 
+                            new.data = as.matrix(raw.counts))
+combat_srt2<- RunPCA(object = combat_srt2,features = rownames(combat_srt2@assays$RNA))  
+
+# Visualization
+
+combat_srt2<- RunUMAP(combat_srt2, reduction = 'pca', dims = 1:20)
+png(paste(base_name, "umap_combat-sva-seq_parametric.png", sep = ""), width = 2*1000, height = 2*500, res = 2*72)
+p1 <- DimPlot(combat_srt2, reduction = 'umap', group.by = "batch")
+p2 <- DimPlot(combat_srt2, reduction = 'umap',group.by = "celltype")
+cowplot::plot_grid(p1, p2)
+dev.off()
+save(combat_srt2, file = paste0(base_name,"combat-sva-seq_seurat_objs.rda"))
+load("~/Desktop/demo_ComBat/combat_dataset/combat-sva-seq_seurat_objs.rda")
+PCAembedding = data.frame(Embeddings(combat_srt2, reduction = 'pca'))
+PCAembedding$celltype <- combat_srt2$celltype
+PCAembedding$batch <- combat_srt2$batch
+write.csv(PCAembedding, file = paste0(base_name,"dataset7_combatsvaseq_pca.csv"))
+########Combat##########
+counts_subset <- assay(sce_obj,"counts")
+sample_subset <- colData(sce_obj)
+batch_subset <- colData(sce_obj)$batch
+combat_output=ComBat(counts_subset, batch=batch_subset,mod = NULL,par.prior = TRUE,prior.plots = FALSE)
+sce_obj_co<- SingleCellExperiment(assays=list(counts=combat_output),colData=sample_subset)
+expvar=t(apply(assay(sce_obj_co,"counts"),1,ssq1,batch=batchind,cell=cellind))
+colnames(expvar)=c("batch","cell","residual")
+ss=apply(expvar,2,sum) ## This is the sum of all SS across all the genes
+ss
+r_combat_all <- ss[2]/ss[1] ## This is the overall ratio between cell and batch 
+r_combat_all
+ss[2]
+ss[1]
+## Calculate the beta coefficients for ComBat
+beta_combat_all <- r_combat_all/r_raw_all
+beta_combat_all 
+##########密度图######
+# 1. 选择 "amacrine" 细胞
+selected_cells_after <- which(colData(sce_obj)$celltype == "amacrine")
+
+# 2. 从 combat_output 中选择相应的细胞数据
+selected_data_after <- combat_output[, selected_cells_after]
+
+# 3. 计算每个细胞的平均基因表达
+average_expression_per_cell_after <- colMeans(selected_data_after)
+
+# 4. 创建数据框
+plot_data <- data.frame(
+  AverageExpression = average_expression_per_cell_after,
+  Batch = batch_subset[selected_cells_after]
+)
+
+# 5. 使用 ggplot2 绘制密度图
+library(ggplot2)
+ggplot(plot_data, aes(x=AverageExpression, fill=Batch)) + 
+  geom_density(alpha=0.5) + 
+  theme_minimal() +
+  labs(title="Density plot of average expression across batches for amacrine cells (After Correction)")
+######所有的基因#######
+# 1. 选择所有细胞的数据
+selected_data_all_after <- combat_output
+
+# 2. 计算每个细胞的平均基因表达
+average_expression_per_cell_all_after <- colMeans(selected_data_all_after)
+
+# 3. 创建数据框
+plot_data_all <- data.frame(
+  AverageExpression = average_expression_per_cell_all_after,
+  Batch = colData(sce_obj)$batch
+)
+
+# 4. 使用 ggplot2 绘制密度图
+library(ggplot2)
+ggplot(plot_data_all, aes(x=AverageExpression, fill=Batch)) + 
+  geom_density(alpha=0.5) + 
+  theme_minimal() +
+  labs(title="Density plot of average expression across batches for all cells (After Correction)")
+
+d1 <- density(average_expression_per_cell_before)
+d2 <- density(average_expression_per_cell_after)
+f1 <- approxfun(d1$x, d1$y, rule=2)
+f2 <- approxfun(d2$x, d2$y, rule=2)
+common_x <- seq(min(c(d1$x, d2$x)), max(c(d1$x, d2$x)), length.out=1000)
+y1 <- f1(common_x)
+y2 <- f2(common_x)
+
+delta_x <- common_x[2] - common_x[1]
+overlap_area <- sum(pmin(y1, y2) * delta_x)
+overlap_area
+#########all 的重叠######
+d1_all <- density(average_expression_per_cell_all)
+d2_all <- density(average_expression_per_cell_all_after)
+f1_all <- approxfun(d1_all$x, d1_all$y, rule=2)
+f2_all <- approxfun(d2_all$x, d2_all$y, rule=2)
+common_x_all <- seq(min(c(d1_all$x, d2_all$x)), max(c(d1_all$x, d2_all$x)), length.out=1000)
+y1_all <- f1_all(common_x_all)
+y2_all <- f2_all(common_x_all)
+
+delta_x_all <- common_x_all[2] - common_x_all[1]
+overlap_area_all <- sum(pmin(y1_all, y2_all) * delta_x_all)
+overlap_area_all
+
+#################
+# Create Seurat object to compute umap, pca
+combat_srt3 <- CreateSeuratObject(counts = combat_output , project = "dataset7_combat", min.cells = 0, min.features = 0)
+dim(combat_srt3@assays$RNA)
+cells_use <- colnames(combat_srt3@assays$RNA)
+combat_srt3@meta.data$batch <- mySample$batch
+combat_srt3@meta.data$celltype <- mySample$celltype
+
+max(GetAssayData(object = combat_srt3, slot = "counts"))
+min(GetAssayData(object = combat_srt3, slot = "counts"))
+raw.counts = GetAssayData(object = combat_srt3, slot = "counts")
+combat_srt3 <- SetAssayData(object = combat_srt3, slot = "scale.data", 
+                            new.data = as.matrix(raw.counts))
+combat_srt3<- RunPCA(object = combat_srt3,features = rownames(combat_srt3@assays$RNA))  
+
+# Visualization
+
+combat_srt3<- RunUMAP(combat_srt3, reduction = 'pca', dims = 1:20)
+png(paste(base_name, "umap_combat_parametric.png", sep = ""), width = 2*1000, height = 2*500, res = 2*72)
+p1 <- DimPlot(combat_srt3, reduction = 'umap', group.by = "batch")
+p2 <- DimPlot(combat_srt3, reduction = 'umap',group.by = "celltype")
+cowplot::plot_grid(p1, p2)
+dev.off()
+save(combat_srt3, file = paste0(base_name,"combat_seurat_objs.rda"))
+load("~/Desktop/demo_ComBat/combat_dataset/combat_seurat_objs.rda")
+PCAembedding = data.frame(Embeddings(combat_srt3, reduction = 'pca'))
+PCAembedding$celltype <- combat_srt3$celltype
+PCAembedding$batch <- combat_srt3$batch
+write.csv(PCAembedding, file = paste0(base_name,"dataset7_combat_pca.csv"))
+########Combat_cell##########
+mod_celltype= model.matrix(~as.factor(celltype), data=sample_subset)
+combat_cell_output=ComBat(counts_subset, batch=batch_subset,mod = mod_celltype,par.prior = TRUE,prior.plots = FALSE)
+sce_obj_cell<- SingleCellExperiment(assays=list(counts=combat_cell_output),colData=sample_subset)
+expvar=t(apply(assay(sce_obj_cell,"counts"),1,ssq1,batch=batchind,cell=cellind))
+colnames(expvar)=c("batch","cell","residual")
+ss=apply(expvar,2,sum) ## This is the sum of all SS across all the genes
+ss
+r_combat_cell_all <- ss[2]/ss[1] ## This is the overall ratio between cell and batch 
+r_combat_cell_all
+ss[2]
+ss[1]
+## Calculate the beta coefficients for ComBat-cell
+beta_combat_cell_all <- r_combat_cell_all/r_raw_all
+beta_combat_cell_all 
+########密度####
+# 1. 选择所有细胞的数据
+selected_data_all_after <- combat_cell_output
+
+# 2. 计算每个细胞的平均基因表达
+average_expression_per_cell_all_after <- colMeans(selected_data_all_after)
+
+# 3. 创建数据框
+plot_data_all <- data.frame(
+  AverageExpression = average_expression_per_cell_all_after,
+  Batch = colData(sce_obj)$batch
+)
+
+# 4. 使用 ggplot2 绘制密度图
+library(ggplot2)
+ggplot(plot_data_all, aes(x=AverageExpression, fill=Batch)) + 
+  geom_density(alpha=0.5) + 
+  theme_minimal() +
+  labs(title="Density plot of average expression across batches for all cells (After Correction)")
+
+#########
+combat_srt4 <- CreateSeuratObject(counts = combat_cell_output , project = "dataset7_combat", min.cells = 0, min.features = 0)
+dim(combat_srt4@assays$RNA)
+cells_use <- colnames(combat_srt4@assays$RNA)
+combat_srt4@meta.data$batch <- mySample$batch
+combat_srt4@meta.data$celltype <- mySample$celltype
+
+max(GetAssayData(object = combat_srt4, slot = "counts"))
+min(GetAssayData(object = combat_srt4, slot = "counts"))
+raw.counts = GetAssayData(object = combat_srt4, slot = "counts")
+combat_srt4 <- SetAssayData(object = combat_srt4, slot = "scale.data", 
+                            new.data = as.matrix(raw.counts))
+combat_srt4<- RunPCA(object = combat_srt4,features = rownames(combat_srt4@assays$RNA))  
+
+# Visualization
+
+combat_srt4<- RunUMAP(combat_srt4, reduction = 'pca', dims = 1:20)
+png(paste(base_name, "umap_combat_cell_parametric.png", sep = ""), width = 2*1000, height = 2*500, res = 2*72)
+p1 <- DimPlot(combat_srt4, reduction = 'umap', group.by = "batch")
+p2 <- DimPlot(combat_srt4, reduction = 'umap',group.by = "celltype")
+cowplot::plot_grid(p1, p2)
+dev.off()
+save(combat_srt4, file = paste0(base_name,"combat_cell_seurat_objs.rda"))
+load("~/Desktop/demo_ComBat/combat_dataset/combat_cell_seurat_objs.rda")
+PCAembedding = data.frame(Embeddings(combat_srt4, reduction = 'pca'))
+PCAembedding$celltype <- combat_srt4$celltype
+PCAembedding$batch <- combat_srt4$batch
+write.csv(PCAembedding, file = paste0(base_name,"dataset7_combatcell_pca.csv"))
+###########Combat-SVA##########
+## Now use ComBat-seq with the surrogate variables 
+mod_SVA = model.matrix(~sample_SVA$SV1+sample_SVA$SV2+sample_SVA$SV3+sample_SVA$SV4+sample_SVA$SV5+sample_SVA$SV6+sample_SVA$SV7+sample_SVA$SV8,data=sample_SVA)
+combat_SVA = ComBat(counts_subset, batch=batch_subset,mod=mod_SVA)
+sce_obj_SVA <- SingleCellExperiment(assays=list(counts=combat_SVA),colData=sample_subset)
+expvar=t(apply(assay(sce_obj_SVA,"counts"),1,ssq1,batch=batchind,cell=cellind))
+colnames(expvar)=c("batch","cell","residual")
+ss=apply(expvar,2,sum) ## This is the sum of all SS across all the genes
+ss
+r_combatsva_all <- ss[2]/ss[1] ## This is the overall ratio between cell and batch 
+r_combatsva_all
+ss[2]
+ss[1]
+## Calculate the beta coefficients for ComBat-seq
+beta_combatsva_all <- r_combatsvaseq_all/r_raw_all
+beta_combatsva_all 
+combat_srt5 <- CreateSeuratObject(counts = combat_SVA , project = "dataset7_combat", min.cells = 0, min.features = 0)
+dim(combat_srt5@assays$RNA)
+cells_use <- colnames(combat_srt5@assays$RNA)
+combat_srt5@meta.data$batch <- mySample$batch
+combat_srt5@meta.data$celltype <- mySample$celltype
+
+max(GetAssayData(object = combat_srt5, slot = "counts"))
+min(GetAssayData(object = combat_srt5, slot = "counts"))
+raw.counts = GetAssayData(object = combat_srt5, slot = "counts")
+combat_srt5 <- SetAssayData(object = combat_srt5, slot = "scale.data", 
+                            new.data = as.matrix(raw.counts))
+combat_srt5<- RunPCA(object = combat_srt5,features = rownames(combat_srt5@assays$RNA))  
+
+# Visualization
+
+combat_srt5<- RunUMAP(combat_srt5, reduction = 'pca', dims = 1:20)
+png(paste(base_name, "umap_combat_SVA_parametric.png", sep = ""), width = 2*1000, height = 2*500, res = 2*72)
+p1 <- DimPlot(combat_srt5, reduction = 'umap', group.by = "batch")
+p2 <- DimPlot(combat_srt5, reduction = 'umap',group.by = "celltype")
+cowplot::plot_grid(p1, p2)
+dev.off()
+save(combat_srt5, file = paste0(base_name,"combatsva_seurat_objs.rda"))
+load("~/Desktop/demo_ComBat/combat_dataset/combatsva_seurat_objs.rda")
+PCAembedding = data.frame(Embeddings(combat_srt5, reduction = 'pca'))
+PCAembedding$celltype <- combat_srt5$celltype
+PCAembedding$batch <- combat_srt5$batch
+write.csv(PCAembedding, file = paste0(base_name,"dataset7_combatsva_pca.csv"))
+
+
+
+
+
+
+
